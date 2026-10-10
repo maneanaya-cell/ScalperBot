@@ -1,0 +1,26 @@
+name: Ejecutar Bot de Trading
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Esto te permite ejecutarlo manualmente cuando quieras probarlo
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Copiar código del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar versión de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Instalar dependencias (ccxt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt
+
+      - name: 🚀 Ejecutar script de trading
+        run: python Bottrading.py
