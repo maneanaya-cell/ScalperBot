@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 
 def calcular_rsi(series, periodo=14):
-    """Calcula el indicador RSI usando pandas."""
     delta = series.diff()
     ganancia = (delta.where(delta > 0, 0)).rolling(window=periodo).mean()
     perdida = (-delta.where(delta < 0, 0)).rolling(window=periodo).mean()
@@ -12,7 +11,6 @@ def calcular_rsi(series, periodo=14):
     return 100 - (100 / (1 + rs))
 
 def calcular_atr(df, periodo=200):
-    """Calcula el Average True Range (ATR) para las bandas del canal."""
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -22,12 +20,12 @@ def calcular_atr(df, periodo=200):
 
 def run_bot():
     try:
-        # 1. Credenciales y Conexión
+        # 1. Credenciales de la API principal configuradas en GitHub Secrets
         api_key = os.getenv('BINGX_API_KEY')
         secret_key = os.getenv('BINGX_SECRET_KEY')
 
         if not api_key or not secret_key:
-            print("❌ Error: No se encontraron las credenciales de BingX en las variables de entorno.")
+            print("❌ Error: No se encontraron las credenciales en las variables de entorno.")
             return
 
         exchange = ccxt.bingx({
@@ -39,13 +37,16 @@ def run_bot():
             }
         })
 
-        exchange.load_markets()
-        print("✅ Conexión exitosa con BingX y mercados cargados.")
+        # Activamos el modo sandbox (prueba/demo) para usar fondos virtuales (VST)
+        exchange.set_sandbox_mode(True)
 
-        # 2. Consultar balance
+        exchange.load_markets()
+        print("✅ Conexión establecida con BingX (Modo Sandbox/Demo activo).")
+
+        # 2. Consultar balance virtual
         balance = exchange.fetch_balance()
         usdt_free = balance['USDT']['free'] if 'USDT' in balance else 0
-        print(f"💰 Balance disponible en USDT: {usdt_free}")
+        print(f"💰 Balance disponible en la cuenta de prueba: {usdt_free}")
 
         # 3. Símbolo y Temporalidad
         simbolo = 'BTC/USDT:USDT'
@@ -53,26 +54,22 @@ def run_bot():
         
         print(f"📊 Analizando el mercado para {simbolo} en temporalidad {timeframe}...")
         
-        # Obtenemos suficientes velas para el cálculo del canal (mínimo 250 para el ATR y length)
         ohlcv = exchange.fetch_ohlcv(simbolo, timeframe=timeframe, limit=250)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 4. Calcular Indicadores Técnicos
+        # 4. Indicadores Técnicos
         df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['RSI'] = calcular_rsi(df['close'], periodo=14)
         
-        # Traducción del Canal S&R Power (ChartPrime)
         length = 130
         atr = calcular_atr(df, periodo=200)
-        
         rolling_max = df['high'].rolling(window=length).max()
         rolling_min = df['low'].rolling(window=length).min()
         
-        df['SR_Top'] = rolling_max + (atr * 0.5)  # Banda Superior (Resistencia)
-        df['SR_Bot'] = rolling_min - (atr * 0.5)  # Banda Inferior (Soporte)
+        df['SR_Top'] = rolling_max + (atr * 0.5)
+        df['SR_Bot'] = rolling_min - (atr * 0.5)
         
-        # Obtener valores actuales de la última vela
         precio_actual = df['close'].iloc[-1]
         ema9_actual = df['EMA_9'].iloc[-1]
         ema21_actual = df['EMA_21'].iloc[-1]
@@ -85,22 +82,29 @@ def run_bot():
         print(f"📈 RSI (14): {rsi_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
 
-        # 5. Estrategia combinada (Canal S&R + EMAs + RSI)
-        # Compra si el precio está cerca de la zona de soporte inferior o hay cruce alcista con RSI saludable
+        cantidad_btc = 0.001  
+
+        # 5. Lógica de Estrategia y Ejecución en Demo
         if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
-            print("🟢 Señal potencial de COMPRA detectada (Rebote en Soporte / Tendencia alcista).")
-            # Aquí puedes añadir la orden real en el futuro: exchange.create_market_buy_order(...)
-            
-        # Venta si el precio está cerca de la resistencia superior o cruce bajista
+            print("🟢 Señal de COMPRA detectada en DEMO...")
+            if usdt_free > 5:
+                orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
+                print(f"✅ ¡Orden de COMPRA virtual ejecutada con éxito! ID: {orden['id']}")
+            else:
+                print("⚠️ Señal detectada, pero el balance virtual en USDT es insuficiente.")
+
         elif precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35):
-            print("🔴 Señal potencial de VENTA detectada (Cerca de Resistencia / Tendencia bajista).")
-            # Aquí puedes añadir la orden real en el futuro: exchange.create_market_sell_order(...)
-            
+            print("🔴 Señal de VENTA detectada en DEMO...")
+            if usdt_free > 5:
+                orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
+                print(f"✅ ¡Orden de VENTA virtual ejecutada con éxito! ID: {orden['id']}")
+            else:
+                print("⚠️ Señal detectada, pero el balance virtual en USDT es insuficiente.")
         else:
-            print("⏳ Precio oscilando dentro del canal. Sin señales de ruptura o rebote claro.")
+            print("⏳ Sin señales de ejecución en este ciclo.")
 
     except Exception as e:
-        print(f"⚠️ Ocurrió un error al ejecutar el bot: {e}")
+        print(f"⚠️ Error al conectar o operar en la cuenta demo: {e}")
 
 if __name__ == "__main__":
     run_bot()
