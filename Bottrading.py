@@ -79,24 +79,32 @@ def run_bot():
         print(f"📈 RSI (14): {rsi_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
 
-        cantidad_btc = 0.001  # Lote mínimo para BTC
+        # Definir el monto en USD que deseas arriesgar por operación (ej. 0.10 USDT)
+        inversion_usd = 0.10 
+        
+        # Calcular los BTC necesarios en función del precio actual y redondeando a 4 decimales
+        cantidad_btc = round(inversion_usd / precio_actual, 4)
+        if cantidad_btc < 0.0001:
+            cantidad_btc = 0.0001 # Aseguramos el mínimo aceptado
 
-        # 5. Lógica de Estrategia y Ejecución Real (Modo Unidireccional)
+        print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC (aprox. {inversion_usd} USDT)")
+
+        # 5. Lógica de Estrategia y Ejecución Real
         if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
             print("🟢 Señal de COMPRA detectada...")
-            if usdt_free >= 0.5:
+            if usdt_free >= 0.05:
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
                 print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {orden['id']}")
             else:
-                print("⚠️ Balance insuficiente (< 0.5 USDT) para operar.")
+                print("⚠️ Balance insuficiente para operar.")
 
         elif precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35):
             print("🔴 Señal de VENTA detectada...")
-            if usdt_free >= 0.5:
+            if usdt_free >= 0.05:
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
                 print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {orden['id']}")
             else:
-                print("⚠️ Balance insuficiente (< 0.5 USDT) para operar.")
+                print("⚠️ Balance insuficiente para operar.")
         else:
             print("⏳ Sin señales de ejecución en este ciclo.")
 
