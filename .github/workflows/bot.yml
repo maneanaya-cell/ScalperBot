@@ -23,4 +23,7 @@ jobs:
           pip install ccxt
 
       - name: 🚀 Ejecutar script de trading
+        env:
+          BINGX_API_KEY: ${{ secrets.BINGX_API_KEY }}
+          BINGX_SECRET_KEY: ${{ secrets.BINGX_SECRET_KEY }}
         run: python Bottrading.py
