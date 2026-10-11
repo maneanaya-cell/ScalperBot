@@ -20,7 +20,7 @@ def calcular_atr(df, periodo=200):
 
 def run_bot():
     try:
-        # 1. Credenciales de la API principal configuradas en GitHub Secrets
+        # 1. Credenciales y Conexión Real
         api_key = os.getenv('BINGX_API_KEY')
         secret_key = os.getenv('BINGX_SECRET_KEY')
 
@@ -37,16 +37,13 @@ def run_bot():
             }
         })
 
-        # Activamos el modo sandbox (prueba/demo) para usar fondos virtuales (VST)
-        exchange.set_sandbox_mode(True)
-
         exchange.load_markets()
-        print("✅ Conexión establecida con BingX (Modo Sandbox/Demo activo).")
+        print("✅ Conexión establecida con la cuenta de BingX.")
 
-        # 2. Consultar balance virtual
+        # 2. Consultar balance real
         balance = exchange.fetch_balance()
         usdt_free = balance['USDT']['free'] if 'USDT' in balance else 0
-        print(f"💰 Balance disponible en la cuenta de prueba: {usdt_free}")
+        print(f"💰 Balance disponible en USDT (Real): {usdt_free}")
 
         # 3. Símbolo y Temporalidad
         simbolo = 'BTC/USDT:USDT'
@@ -82,29 +79,29 @@ def run_bot():
         print(f"📈 RSI (14): {rsi_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
 
-        cantidad_btc = 0.001  
+        cantidad_btc = 0.001  # Lote mínimo para BTC
 
-        # 5. Lógica de Estrategia y Ejecución en Demo
+        # 5. Lógica de Estrategia y Ejecución Real (Umbral ajustado a 0.5 USDT)
         if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
-            print("🟢 Señal de COMPRA detectada en DEMO...")
-            if usdt_free > 5:
+            print("🟢 Señal de COMPRA detectada...")
+            if usdt_free >= 0.5:
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
-                print(f"✅ ¡Orden de COMPRA virtual ejecutada con éxito! ID: {orden['id']}")
+                print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {orden['id']}")
             else:
-                print("⚠️ Señal detectada, pero el balance virtual en USDT es insuficiente.")
+                print("⚠️ Balance insuficiente (< 0.5 USDT) para operar.")
 
         elif precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35):
-            print("🔴 Señal de VENTA detectada en DEMO...")
-            if usdt_free > 5:
+            print("🔴 Señal de VENTA detectada...")
+            if usdt_free >= 0.5:
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
-                print(f"✅ ¡Orden de VENTA virtual ejecutada con éxito! ID: {orden['id']}")
+                print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {orden['id']}")
             else:
-                print("⚠️ Señal detectada, pero el balance virtual en USDT es insuficiente.")
+                print("⚠️ Balance insuficiente (< 0.5 USDT) para operar.")
         else:
             print("⏳ Sin señales de ejecución en este ciclo.")
 
     except Exception as e:
-        print(f"⚠️ Error al conectar o operar en la cuenta demo: {e}")
+        print(f"⚠️ Error al operar: {e}")
 
 if __name__ == "__main__":
     run_bot()
