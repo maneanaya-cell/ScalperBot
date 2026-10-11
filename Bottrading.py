@@ -81,7 +81,7 @@ def run_bot():
 
         cantidad_btc = 0.001  # Lote mínimo para BTC
 
-        # 5. Lógica de Estrategia y Ejecución Real (Umbral ajustado a 0.5 USDT)
+        # 5. Lógica de Estrategia y Ejecución Real (Modo Unidireccional)
         if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
             print("🟢 Señal de COMPRA detectada...")
             if usdt_free >= 0.5:
