@@ -17,10 +17,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 📦 Instalar dependencias (ccxt)
+      - name: 📦 Instalar dependencias (ccxt y pandas)
         run: |
           python -m pip install --upgrade pip
-          pip install ccxt
+          pip install ccxt pandas
 
       - name: 🚀 Ejecutar script de trading
         env:
