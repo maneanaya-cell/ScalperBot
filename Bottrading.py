@@ -2,6 +2,37 @@ import os
 import ccxt
 import pandas as pd
 import numpy as np
+from datetime import datetime
+
+# Archivo donde se guardará el registro
+CSV_FILE = 'historial_operaciones.csv'
+
+def registrar_operacion(evento, simbolo, tipo, precio_entrada, precio_salida=0.0, resultado_pct=0.0, estado="ABIERTA", id_orden=""):
+    """Guarda un registro estructurado de cada operación en el archivo CSV."""
+    encabezados = ['Fecha_Hora', 'Evento', 'Simbolo', 'Tipo', 'Precio_Entrada', 'Precio_Salida', 'Resultado_Pct', 'Estado', 'ID_Orden']
+    
+    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    nueva_fila = {
+        'Fecha_Hora': fecha_actual,
+        'Evento': evento,
+        'Simbolo': simbolo,
+        'Tipo': tipo.upper(),
+        'Precio_Entrada': precio_entrada,
+        'Precio_Salida': precio_salida,
+        'Resultado_Pct': round(resultado_pct, 2),
+        'Estado': estado,
+        'ID_Orden': id_orden
+    }
+    
+    # Crear archivo con encabezados si no existe
+    if not os.path.exists(CSV_FILE):
+        df_log = pd.DataFrame([nueva_fila], columns=encabezados)
+        df_log.to_csv(CSV_FILE, index=False)
+    else:
+        df_log = pd.DataFrame([nueva_fila])
+        df_log.to_csv(CSV_FILE, mode='a', header=False, index=False)
+        
+    print(f"📝 Registrado en CSV -> Evento: {evento} | Tipo: {tipo} | Estado: {estado}")
 
 def calcular_rsi(series, periodo=14):
     delta = series.diff()
@@ -105,16 +136,13 @@ def run_bot():
             if ganancia_pct >= 0.5:
                 print("🎯 ¡Meta de 0.5% alcanzada! Ajustando Trailing Stop (asegurando 0.2% y distancia 0.3%)...")
                 
-                # Cancelar órdenes abiertas previas (como el SL fijo anterior) para evitar conflictos
                 try:
                     exchange.cancel_all_orders(simbolo)
                 except:
                     pass
 
-                # Calcular nuevo SL dinámico asegurando el 0.2% y manteniendo 0.3% de distancia del precio actual
                 if side == 'long':
-                    nuevo_sl = round(precio_actual * (1 - 0.003), 1) # 0.3% por debajo del precio actual
-                    # Asegurar que el SL esté al menos garantizando el 0.2% de ganancia respecto a la entrada
+                    nuevo_sl = round(precio_actual * (1 - 0.003), 1)
                     sl_minimo_garantizado = entry_price * 1.002
                     if nuevo_sl < sl_minimo_garantizado:
                         nuevo_sl = round(sl_minimo_garantizado, 1)
@@ -125,7 +153,7 @@ def run_bot():
                     })
                     print(f"✅ Trailing Stop en LONG actualizado a: {nuevo_sl}")
                 else:
-                    nuevo_sl = round(precio_actual * (1 + 0.003), 1) # 0.3% por encima del precio actual
+                    nuevo_sl = round(precio_actual * (1 + 0.003), 1)
                     sl_minimo_garantizado = entry_price * 0.998
                     if nuevo_sl > sl_minimo_garantizado:
                         nuevo_sl = round(sl_minimo_garantizado, 1)
@@ -135,6 +163,9 @@ def run_bot():
                         'reduceOnly': True
                     })
                     print(f"✅ Trailing Stop en SHORT actualizado a: {nuevo_sl}")
+                
+                # Registrar actualización de Trailing Stop en CSV
+                registrar_operacion("AJUSTE_TRAILING", simbolo, side, entry_price, precio_actual, ganancia_pct, "TRAILING_ACTIVO")
             else:
                 print("⏳ Posición abierta con ganancia < 0.5%. Manteniendo Stop Loss estructural de protección.")
             return
@@ -150,11 +181,10 @@ def run_bot():
         if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
             print("🟢 Señal de COMPRA detectada...")
             if usdt_free >= 0.05:
-                # Abrir orden de compra a mercado
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
-                print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {orden['id']}")
+                order_id = orden.get('id', '')
+                print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {order_id}")
                 
-                # SL inicial por debajo de la zona de soporte del canal S&R
                 sl_inicial = round(sr_bot_actual * 0.995, 1)
                 
                 try:
@@ -165,17 +195,19 @@ def run_bot():
                     print(f"🛡️ Stop Loss inicial colocado debajo del soporte en: {sl_inicial}")
                 except Exception as e_sl:
                     print(f"⚠️ Orden abierta, pero detalle al colocar el SL inicial: {e_sl}")
+                
+                # Registrar apertura LONG en CSV
+                registrar_operacion("APERTURA", simbolo, "LONG", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
             else:
                 print("⚠️ Balance insuficiente para operar.")
 
         elif precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35):
             print("🔴 Señal de VENTA detectada...")
             if usdt_free >= 0.05:
-                # Abrir orden de venta a mercado (Short)
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
-                print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {orden['id']}")
+                order_id = orden.get('id', '')
+                print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {order_id}")
                 
-                # SL inicial por encima de la zona de resistencia del canal S&R
                 sl_inicial = round(sr_top_actual * 1.005, 1)
                 
                 try:
@@ -186,6 +218,9 @@ def run_bot():
                     print(f"🛡️ Stop Loss inicial colocado encima de la resistencia en: {sl_inicial}")
                 except Exception as e_sl:
                     print(f"⚠️ Orden abierta, pero detalle al colocar el SL inicial: {e_sl}")
+                
+                # Registrar apertura SHORT en CSV
+                registrar_operacion("APERTURA", simbolo, "SHORT", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
             else:
                 print("⚠️ Balance insuficiente para operar.")
         else:
