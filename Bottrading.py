@@ -119,7 +119,7 @@ def run_bot():
         print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Centro: {sr_centro:.2f} | Resistencia: {sr_top_actual:.2f}")
 
-        # 3. GESTIÓN DE POSICIÓN ACTIVA (Toma de ganancias parciales en el centro y final del canal)
+        # 3. GESTIÓN DE POSICIÓN ACTIVA (Toma de ganancias parciales con validación estricta de PROFIT > 0)
         if posicion_activa:
             side = posicion_activa['side'] # 'long' o 'short'
             entry_price = float(posicion_activa['entryPrice'])
@@ -128,39 +128,47 @@ def run_bot():
 
             if side == 'long':
                 ganancia_pct = ((precio_actual - entry_price) / entry_price) * 100
-                # Si el precio toca el centro del canal o la resistencia superior, tomamos ganancia parcial o total
-                if precio_actual >= sr_centro:
-                    print("🎯 Precio alcanzó el CENTRO del canal. Tomando ganancia parcial o cerrando objetivo intermedio...")
-                    # Cerramos la mitad de los contratos si es posible, o aseguramos salida
+                
+                # REQUISITO ESTRICTO: Solo toma ganancia parcial si el precio llegó al centro Y la ganancia es positiva (> 0)
+                if precio_actual >= sr_centro and ganancia_pct > 0:
+                    print(f"🎯 Precio en el centro del canal con ganancia real ({ganancia_pct:.2f}%). Tomando ganancia parcial...")
                     try:
                         mitad_contratos = round(amount / 2, 4)
                         if mitad_contratos >= 0.0001:
                             exchange.create_market_sell_order(simbolo, mitad_contratos, {'reduceOnly': True})
-                            print(f"✅ Venta parcial ejecutada en el centro del canal. Ganancia: {ganancia_pct:.2f}%")
-                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "PARCIAL_ CERRADA")
+                            print(f"✅ Venta parcial ejecutada. Ganancia asegurada: {ganancia_pct:.2f}%")
+                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "PARCIAL_CERRADA")
                     except Exception as e_tp:
                         print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
-                elif precio_actual >= sr_top_actual:
-                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL! Cerrando posición completa...")
+                        
+                elif precio_actual >= sr_top_actual and ganancia_pct > 0:
+                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL con ganancias! Cerrando posición completa...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
+                else:
+                    print(f"⏳ Posición LONG activa. Ganancia actual: {ganancia_pct:.2f}% (Esperando objetivo de ganancia real).")
             
             else: # SHORT
                 ganancia_pct = ((entry_price - precio_actual) / entry_price) * 100
-                if precio_actual <= sr_centro:
-                    print("🎯 Precio alcanzó el CENTRO del canal bajista. Tomando ganancia parcial...")
+                
+                # REQUISITO ESTRICTO: Solo toma ganancia parcial si el precio bajó al centro Y la ganancia es positiva (> 0)
+                if precio_actual <= sr_centro and ganancia_pct > 0:
+                    print(f"🎯 Precio en el centro del canal bajista con ganancia real ({ganancia_pct:.2f}%). Tomando ganancia parcial...")
                     try:
                         mitad_contratos = round(amount / 2, 4)
                         if mitad_contratos >= 0.0001:
                             exchange.create_market_buy_order(simbolo, mitad_contratos, {'reduceOnly': True})
-                            print(f"✅ Compra parcial ejecutada en el centro del canal. Ganancia: {ganancia_pct:.2f}%")
+                            print(f"✅ Compra parcial ejecutada. Ganancia asegurada: {ganancia_pct:.2f}%")
                             registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "PARCIAL_CERRADA")
                     except Exception as e_tp:
                         print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
-                elif precio_actual <= sr_bot_actual:
-                    print("🚀 ¡Precio tocó el SOPORTE FINAL! Cerrando posición completa...")
+                        
+                elif precio_actual <= sr_bot_actual and ganancia_pct > 0:
+                    print("🚀 ¡Precio tocó el SOPORTE FINAL con ganancias! Cerrando posición completa...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
+                else:
+                    print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}% (Esperando objetivo de ganancia real).")
             return
 
         # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro estricto de la EMA 200)
