@@ -24,7 +24,6 @@ def registrar_operacion(evento, simbolo, tipo, precio_entrada, precio_salida=0.0
         'ID_Orden': id_orden
     }
     
-    # Crear archivo con encabezados si no existe
     if not os.path.exists(CSV_FILE):
         df_log = pd.DataFrame([nueva_fila], columns=encabezados)
         df_log.to_csv(CSV_FILE, index=False)
@@ -71,7 +70,7 @@ def run_bot():
         exchange.load_markets()
         print("✅ Conexión establecida con la cuenta de BingX.")
 
-        # 2. Consultar balance real y posiciones abiertas actuales
+        # 2. Consultar balance y posiciones activas
         balance = exchange.fetch_balance()
         usdt_free = balance['USDT']['free'] if 'USDT' in balance else 0
         print(f"💰 Balance disponible en USDT (Real): {usdt_free}")
@@ -79,7 +78,6 @@ def run_bot():
         simbolo = 'BTC/USDT:USDT'
         timeframe = '15m'
 
-        # Verificamos si ya tenemos una posición abierta para gestionarla (Trailing Dinámico)
         posiciones = exchange.fetch_positions([simbolo])
         posicion_activa = None
         for p in posiciones:
@@ -87,7 +85,7 @@ def run_bot():
                 posicion_activa = p
                 break
 
-        # Símbolo y Temporalidad para análisis
+        # Análisis de mercado
         print(f"📊 Analizando el mercado para {simbolo} en temporalidad {timeframe}...")
         ohlcv = exchange.fetch_ohlcv(simbolo, timeframe=timeframe, limit=250)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -95,6 +93,7 @@ def run_bot():
         # Indicadores Técnicos
         df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()  # Filtro de tendencia principal
         df['RSI'] = calcular_rsi(df['close'], periodo=14)
         
         length = 130
@@ -108,123 +107,115 @@ def run_bot():
         precio_actual = df['close'].iloc[-1]
         ema9_actual = df['EMA_9'].iloc[-1]
         ema21_actual = df['EMA_21'].iloc[-1]
+        ema200_actual = df['EMA_200'].iloc[-1]
         rsi_actual = df['RSI'].iloc[-1]
         sr_top_actual = df['SR_Top'].iloc[-1]
         sr_bot_actual = df['SR_Bot'].iloc[-1]
+        
+        # Centro del canal S&R para toma de ganancias parciales
+        sr_centro = (sr_top_actual + sr_bot_actual) / 2
 
         print(f"📈 Precio Actual: {precio_actual}")
-        print(f"📈 EMA 9: {ema9_actual:.2f} | EMA 21: {ema21_actual:.2f}")
-        print(f"📈 RSI (14): {rsi_actual:.2f}")
-        print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
+        print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
+        print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Centro: {sr_centro:.2f} | Resistencia: {sr_top_actual:.2f}")
 
-        # 3. GESTIÓN DE POSICIÓN ABIERTA (Si ya hay una posición en marcha)
+        # 3. GESTIÓN DE POSICIÓN ACTIVA (Toma de ganancias parciales en el centro y final del canal)
         if posicion_activa:
             side = posicion_activa['side'] # 'long' o 'short'
             entry_price = float(posicion_activa['entryPrice'])
             amount = float(posicion_activa['contracts'])
             print(f"ℹ️ Posición activa detectada: {side.upper()} | Entrada: {entry_price} | Cantidad: {amount}")
 
-            # Calcular ganancia porcentual actual
             if side == 'long':
                 ganancia_pct = ((precio_actual - entry_price) / entry_price) * 100
-            else:
+                # Si el precio toca el centro del canal o la resistencia superior, tomamos ganancia parcial o total
+                if precio_actual >= sr_centro:
+                    print("🎯 Precio alcanzó el CENTRO del canal. Tomando ganancia parcial o cerrando objetivo intermedio...")
+                    # Cerramos la mitad de los contratos si es posible, o aseguramos salida
+                    try:
+                        mitad_contratos = round(amount / 2, 4)
+                        if mitad_contratos >= 0.0001:
+                            exchange.create_market_sell_order(simbolo, mitad_contratos, {'reduceOnly': True})
+                            print(f"✅ Venta parcial ejecutada en el centro del canal. Ganancia: {ganancia_pct:.2f}%")
+                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "PARCIAL_ CERRADA")
+                    except Exception as e_tp:
+                        print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
+                elif precio_actual >= sr_top_actual:
+                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL! Cerrando posición completa...")
+                    exchange.close_position(simbolo)
+                    registrar_operacion("TP_FINAL", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
+            
+            else: # SHORT
                 ganancia_pct = ((entry_price - precio_actual) / entry_price) * 100
-
-            print(f"📊 Ganancia actual de la posición: {ganancia_pct:.2f}%")
-
-            # Si la ganancia supera o iguala el 0.5%, aplicamos / actualizamos el Trailing Stop dinámico
-            if ganancia_pct >= 0.5:
-                print("🎯 ¡Meta de 0.5% alcanzada! Ajustando Trailing Stop (asegurando 0.2% y distancia 0.3%)...")
-                
-                try:
-                    exchange.cancel_all_orders(simbolo)
-                except:
-                    pass
-
-                if side == 'long':
-                    nuevo_sl = round(precio_actual * (1 - 0.003), 1)
-                    sl_minimo_garantizado = entry_price * 1.002
-                    if nuevo_sl < sl_minimo_garantizado:
-                        nuevo_sl = round(sl_minimo_garantizado, 1)
-
-                    exchange.create_order(simbolo, 'stop_market', 'sell', amount, None, {
-                        'stopPrice': nuevo_sl,
-                        'reduceOnly': True
-                    })
-                    print(f"✅ Trailing Stop en LONG actualizado a: {nuevo_sl}")
-                else:
-                    nuevo_sl = round(precio_actual * (1 + 0.003), 1)
-                    sl_minimo_garantizado = entry_price * 0.998
-                    if nuevo_sl > sl_minimo_garantizado:
-                        nuevo_sl = round(sl_minimo_garantizado, 1)
-
-                    exchange.create_order(simbolo, 'stop_market', 'buy', amount, None, {
-                        'stopPrice': nuevo_sl,
-                        'reduceOnly': True
-                    })
-                    print(f"✅ Trailing Stop en SHORT actualizado a: {nuevo_sl}")
-                
-                # Registrar actualización de Trailing Stop en CSV
-                registrar_operacion("AJUSTE_TRAILING", simbolo, side, entry_price, precio_actual, ganancia_pct, "TRAILING_ACTIVO")
-            else:
-                print("⏳ Posición abierta con ganancia < 0.5%. Manteniendo Stop Loss estructural de protección.")
+                if precio_actual <= sr_centro:
+                    print("🎯 Precio alcanzó el CENTRO del canal bajista. Tomando ganancia parcial...")
+                    try:
+                        mitad_contratos = round(amount / 2, 4)
+                        if mitad_contratos >= 0.0001:
+                            exchange.create_market_buy_order(simbolo, mitad_contratos, {'reduceOnly': True})
+                            print(f"✅ Compra parcial ejecutada en el centro del canal. Ganancia: {ganancia_pct:.2f}%")
+                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "PARCIAL_CERRADA")
+                    except Exception as e_tp:
+                        print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
+                elif precio_actual <= sr_bot_actual:
+                    print("🚀 ¡Precio tocó el SOPORTE FINAL! Cerrando posición completa...")
+                    exchange.close_position(simbolo)
+                    registrar_operacion("TP_FINAL", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
             return
 
-        # 4. APERTURA DE NUEVAS ÓRDENES (Si no hay posición activa)
+        # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro estricto de la EMA 200)
         inversion_usd = 0.10 
         cantidad_btc = round(inversion_usd / precio_actual, 4)
         if cantidad_btc < 0.0001:
             cantidad_btc = 0.0001
 
-        print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC (aprox. {inversion_usd} USDT)")
+        print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC")
 
-        if precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65):
-            print("🟢 Señal de COMPRA detectada...")
+        # SOLO COMPRAS (LONG) si el precio está por encima de la EMA 200 (Tendencia alcista)
+        if precio_actual > ema200_actual and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65)):
+            print("🟢 Señal de COMPRA a favor de tendencia (Precio > EMA 200)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
                 print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {order_id}")
                 
-                sl_inicial = round(sr_bot_actual * 0.995, 1)
-                
+                sl_inicial = round(sr_bot_actual * 0.992, 1)
                 try:
                     exchange.create_order(simbolo, 'stop_market', 'sell', cantidad_btc, None, {
                         'stopPrice': sl_inicial,
                         'reduceOnly': True
                     })
-                    print(f"🛡️ Stop Loss inicial colocado debajo del soporte en: {sl_inicial}")
+                    print(f"🛡️ Stop Loss protector colocado en: {sl_inicial}")
                 except Exception as e_sl:
-                    print(f"⚠️ Orden abierta, pero detalle al colocar el SL inicial: {e_sl}")
+                    print(f"⚠️ Detalle al colocar SL inicial: {e_sl}")
                 
-                # Registrar apertura LONG en CSV
                 registrar_operacion("APERTURA", simbolo, "LONG", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
             else:
                 print("⚠️ Balance insuficiente para operar.")
 
-        elif precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35):
-            print("🔴 Señal de VENTA detectada...")
+        # SOLO VENTAS (SHORT) si el precio está por debajo de la EMA 200 (Tendencia bajista)
+        elif precio_actual < ema200_actual and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35)):
+            print("🔴 Señal de VENTA a favor de tendencia (Precio < EMA 200)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
                 print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {order_id}")
                 
-                sl_inicial = round(sr_top_actual * 1.005, 1)
-                
+                sl_inicial = round(sr_top_actual * 1.008, 1)
                 try:
                     exchange.create_order(simbolo, 'stop_market', 'buy', cantidad_btc, None, {
                         'stopPrice': sl_inicial,
                         'reduceOnly': True
                     })
-                    print(f"🛡️ Stop Loss inicial colocado encima de la resistencia en: {sl_inicial}")
+                    print(f"🛡️ Stop Loss protector colocado en: {sl_inicial}")
                 except Exception as e_sl:
-                    print(f"⚠️ Orden abierta, pero detalle al colocar el SL inicial: {e_sl}")
+                    print(f"⚠️ Detalle al colocar SL inicial: {e_sl}")
                 
-                # Registrar apertura SHORT en CSV
                 registrar_operacion("APERTURA", simbolo, "SHORT", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
             else:
                 print("⚠️ Balance insuficiente para operar.")
         else:
-            print("⏳ Sin señales de ejecución en este ciclo.")
+            print("⏳ Sin señales válidas (filtrado por tendencia EMA 200 o fuera de zonas S&R).")
 
     except Exception as e:
         print(f"⚠️ Error al operar: {e}")
