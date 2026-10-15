@@ -111,16 +111,13 @@ def run_bot():
         rsi_actual = df['RSI'].iloc[-1]
         sr_top_actual = df['SR_Top'].iloc[-1]
         sr_bot_actual = df['SR_Bot'].iloc[-1]
-        
-        # Centro del canal S&R para toma de ganancias parciales y reubicación de SL
-        sr_centro = (sr_top_actual + sr_bot_actual) / 2
 
         print(f"📈 Precio Actual: {precio_actual}")
         print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
-        print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Centro: {sr_centro:.2f} | Resistencia: {sr_top_actual:.2f}")
+        print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
         print(f"📊 RSI Actual: {rsi_actual:.2f}")
 
-        # 3. GESTIÓN DE POSICIÓN ACTIVA
+        # 3. GESTIÓN DE POSICIÓN ACTIVA CON TRAILING STOP DINÁMICO
         if posicion_activa:
             side = posicion_activa['side'] # 'long' o 'short'
             entry_price = float(posicion_activa['entryPrice'])
@@ -129,82 +126,75 @@ def run_bot():
 
             if side == 'long':
                 ganancia_pct = ((precio_actual - entry_price) / entry_price) * 100
-                
-                # Toma de ganancia parcial en el centro si hay ganancia real
-                if precio_actual >= sr_centro and ganancia_pct > 0:
-                    print(f"🎯 Precio en el centro del canal con ganancia real ({ganancia_pct:.2f}%). Tomando ganancia parcial...")
-                    try:
-                        mitad_contratos = round(amount / 2, 4)
-                        if mitad_contratos >= 0.0001:
-                            exchange.create_market_sell_order(simbolo, mitad_contratos, {'reduceOnly': True})
-                            print(f"✅ Venta parcial ejecutada. Ganancia asegurada: {ganancia_pct:.2f}%")
-                            
-                            # Mover Stop Loss a Break-Even (precio de entrada) para proteger el resto
-                            try:
-                                ordenes_abiertas = exchange.fetch_open_orders(simbolo)
-                                for o in ordenes_abiertas:
-                                    if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
-                                        exchange.cancel_order(o['id'], simbolo)
-                                        print("🛡️ Stop Loss anterior cancelado.")
-                                
-                                sl_seguro = round(entry_price, 1) # Break-even exacto
-                                exchange.create_order(simbolo, 'stop_market', 'sell', round(amount - mitad_contratos, 4), None, {
-                                    'stopPrice': sl_seguro,
-                                    'reduceOnly': True
-                                })
-                                print(f"🛡️ Nuevo Stop Loss protegido en Break-Even: {sl_seguro}")
-                            except Exception as e_sl_up:
-                                print(f"⚠️ No se pudo actualizar el Stop Loss automáticamente: {e_sl_up}")
+                print(f"⏳ Posición LONG activa. Ganancia actual: {ganancia_pct:.2f}%")
 
-                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "PARCIAL_CERRADA")
-                    except Exception as e_tp:
-                        print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
+                # Activación de Trailing Stop si la ganancia llega al +0.4%
+                if ganancia_pct >= 0.4:
+                    # Precio de SL que asegura +0.2% de ganancia (precio de entrada * 1.002)
+                    nuevo_sl = round(entry_price * 1.002, 1)
+                    
+                    # Si el precio sube aún más, ajustamos el SL dinámicamente manteniendo un 0.2% por debajo del precio actual
+                    sl_dinamico = round(precio_actual * 0.998, 1)
+                    if sl_dinamico > nuevo_sl:
+                        nuevo_sl = sl_dinamico
+
+                    print(f"🎯 Ganancia >= 0.4% alcanzada ({ganancia_pct:.2f}%). Actualizando Trailing Stop dinámico...")
+                    try:
+                        ordenes_abiertas = exchange.fetch_open_orders(simbolo)
+                        for o in ordenes_abiertas:
+                            if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
+                                exchange.cancel_order(o['id'], simbolo)
+                                print("🛡️ Stop Loss anterior cancelado.")
+                        
+                        exchange.create_order(simbolo, 'stop_market', 'sell', amount, None, {
+                            'stopPrice': nuevo_sl,
+                            'reduceOnly': True
+                        })
+                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl} (Asegurando beneficios)")
+                        registrar_operacion("TRAILING_UPDATE", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "ACTIVA")
+                    except Exception as e_sl_up:
+                        print(f"⚠️ No se pudo actualizar el Trailing Stop: {e_sl_up}")
                         
                 elif precio_actual >= sr_top_actual and ganancia_pct > 0:
                     print("🚀 ¡Precio tocó la RESISTENCIA FINAL con ganancias! Cerrando posición completa...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
-                else:
-                    print(f"⏳ Posición LONG activa. Ganancia actual: {ganancia_pct:.2f}%")
             
             else: # SHORT
                 ganancia_pct = ((entry_price - precio_actual) / entry_price) * 100
-                
-                if precio_actual <= sr_centro and ganancia_pct > 0:
-                    print(f"🎯 Precio en el centro del canal bajista con ganancia real ({ganancia_pct:.2f}%). Tomando ganancia parcial...")
-                    try:
-                        mitad_contratos = round(amount / 2, 4)
-                        if mitad_contratos >= 0.0001:
-                            exchange.create_market_buy_order(simbolo, mitad_contratos, {'reduceOnly': True})
-                            print(f"✅ Compra parcial ejecutada. Ganancia asegurada: {ganancia_pct:.2f}%")
-                            
-                            # Mover Stop Loss a Break-Even para proteger el short restante
-                            try:
-                                ordenes_abiertas = exchange.fetch_open_orders(simbolo)
-                                for o in ordenes_abiertas:
-                                    if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
-                                        exchange.cancel_order(o['id'], simbolo)
-                                        print("🛡️ Stop Loss anterior cancelado.")
-                                
-                                sl_seguro = round(entry_price, 1)
-                                exchange.create_order(simbolo, 'stop_market', 'buy', round(amount - mitad_contratos, 4), None, {
-                                    'stopPrice': sl_seguro,
-                                    'reduceOnly': True
-                                })
-                                print(f"🛡️ Nuevo Stop Loss protegido en Break-Even: {sl_seguro}")
-                            except Exception as e_sl_up:
-                                print(f"⚠️ No se pudo actualizar el Stop Loss automáticamente: {e_sl_up}")
+                print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}%")
 
-                            registrar_operacion("TP_PARCIAL_CENTRO", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "PARCIAL_CERRADA")
-                    except Exception as e_tp:
-                        print(f"⚠️ Error al ejecutar toma parcial: {e_tp}")
+                # Activación de Trailing Stop Short si la ganancia llega al +0.4%
+                if ganancia_pct >= 0.4:
+                    # Precio de SL que asegura +0.2% de ganancia (precio de entrada * 0.998)
+                    nuevo_sl = round(entry_price * 0.998, 1)
+                    
+                    # Si el precio baja más, el SL baja manteniendo un 0.2% por encima del precio actual
+                    sl_dinamico = round(precio_actual * 1.002, 1)
+                    if sl_dinamico < nuevo_sl:
+                        nuevo_sl = sl_dinamico
+
+                    print(f"🎯 Ganancia >= 0.4% alcanzada ({ganancia_pct:.2f}%). Actualizando Trailing Stop dinámico...")
+                    try:
+                        ordenes_abiertas = exchange.fetch_open_orders(simbolo)
+                        for o in ordenes_abiertas:
+                            if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
+                                exchange.cancel_order(o['id'], simbolo)
+                                print("🛡️ Stop Loss anterior cancelado.")
+                        
+                        exchange.create_order(simbolo, 'stop_market', 'buy', amount, None, {
+                            'stopPrice': nuevo_sl,
+                            'reduceOnly': True
+                        })
+                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl} (Asegurando beneficios)")
+                        registrar_operacion("TRAILING_UPDATE", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "ACTIVA")
+                    except Exception as e_sl_up:
+                        print(f"⚠️ No se pudo actualizar el Trailing Stop: {e_sl_up}")
                         
                 elif precio_actual <= sr_bot_actual and ganancia_pct > 0:
                     print("🚀 ¡Precio tocó el SOPORTE FINAL con ganancias! Cerrando posición completa...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
-                else:
-                    print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}%")
             return
 
         # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro de tendencia EMA 200 y rangos de RSI de Momentum)
