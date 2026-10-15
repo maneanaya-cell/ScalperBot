@@ -118,6 +118,7 @@ def run_bot():
         print(f"📈 Precio Actual: {precio_actual}")
         print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Centro: {sr_centro:.2f} | Resistencia: {sr_top_actual:.2f}")
+        print(f"📊 RSI Actual: {rsi_actual:.2f}")
 
         # 3. GESTIÓN DE POSICIÓN ACTIVA
         if posicion_activa:
@@ -206,7 +207,7 @@ def run_bot():
                     print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}%")
             return
 
-        # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro de la EMA 200)
+        # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro de tendencia EMA 200 y rangos de RSI de Momentum)
         inversion_usd = 0.10 
         cantidad_btc = round(inversion_usd / precio_actual, 4)
         if cantidad_btc < 0.0001:
@@ -214,9 +215,9 @@ def run_bot():
 
         print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC")
 
-        # SOLO COMPRAS (LONG) si el precio está por encima de la EMA 200
-        if precio_actual > ema200_actual and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and rsi_actual < 65)):
-            print("🟢 Señal de COMPRA a favor de tendencia (Precio > EMA 200)...")
+        # SOLO COMPRAS (LONG) si Precio > EMA 200 y el RSI está en zona de impulso alcista (60 a 70)
+        if precio_actual > ema200_actual and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and (60 <= rsi_actual < 70))):
+            print("🟢 Señal de COMPRA por Momentum (Precio > EMA 200 y RSI en rango 60-70)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
@@ -236,9 +237,9 @@ def run_bot():
             else:
                 print("⚠️ Balance insuficiente para operar.")
 
-        # SOLO VENTAS (SHORT) si el precio está por debajo de la EMA 200
-        elif precio_actual < ema200_actual and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and rsi_actual > 35)):
-            print("🔴 Señal de VENTA a favor de tendencia (Precio < EMA 200)...")
+        # SOLO VENTAS (SHORT) si Precio < EMA 200 y el RSI está en zona de impulso bajista (30 a 40)
+        elif precio_actual < ema200_actual and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and (30 < rsi_actual <= 40))):
+            print("🔴 Señal de VENTA por Momentum (Precio < EMA 200 y RSI en rango 30-40)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
@@ -258,7 +259,7 @@ def run_bot():
             else:
                 print("⚠️ Balance insuficiente para operar.")
         else:
-            print("⏳ Sin señales válidas (filtrado por tendencia EMA 200 o fuera de zonas S&R).")
+            print("⏳ Sin señales válidas (filtrado por tendencia EMA 200 o RSI fuera de rangos de momentum).")
 
     except Exception as e:
         print(f"⚠️ Error al operar: {e}")
