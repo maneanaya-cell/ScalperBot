@@ -2,7 +2,7 @@ import os
 import ccxt
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Archivo donde se guardará el registro
 CSV_FILE = 'historial_operaciones.csv'
@@ -48,9 +48,49 @@ def calcular_atr(df, periodo=200):
     true_range = ranges.max(axis=1)
     return true_range.rolling(window=periodo).mean()
 
+def detectar_divergencias(df):
+    """
+    Detecta divergencias simples en las últimas velas:
+    - Alcista: Precio hace mínimo más bajo, RSI hace mínimo más alto.
+    - Bajista: Precio hace máximo más alto, RSI hace máximo más bajo.
+    """
+    if len(df) < 15:
+        return False, False
+
+    # Tomamos una ventana reciente para buscar pivotes
+    p_reciente = df['close'].iloc[-1]
+    p_anterior = df['close'].iloc[-6]
+    p_pasado = df['close'].iloc[-12]
+
+    rsi_reciente = df['RSI'].iloc[-1]
+    rsi_anterior = df['RSI'].iloc[-6]
+    rsi_pasado = df['RSI'].iloc[-12]
+
+    # Divergencia Alcista: Precio cae (mínimo más bajo) pero RSI sube (mínimo más alto)
+    divergencia_alcista = (p_reciente < p_anterior) and (rsi_reciente > rsi_anterior) and (rsi_reciente < 45)
+
+    # Divergencia Bajista: Precio sube (máximo más alto) pero RSI baja (máximo más bajo)
+    divergencia_bajista = (p_reciente > p_anterior) and (rsi_reciente < rsi_anterior) and (rsi_reciente > 55)
+
+    return divergencia_alcista, divergencia_bajista
+
+def es_horario_operativo():
+    """Valida si alguna de las tres grandes sesiones (Tokio, Londres, Nueva York) está activa en UTC."""
+    now_utc = datetime.now(timezone.utc)
+    hora = now_utc.hour + now_utc.minute / 60.0
+    
+    tokio = 0 <= hora < 9          # 00:00 a 09:00 UTC
+    londres = 8 <= hora < 16.5     # 08:00 a 16:30 UTC
+    ny = 13.5 <= hora < 20         # 13:30 a 20:00 UTC
+    
+    return tokio or londres or ny
+
 def run_bot():
     try:
-        # 1. Credenciales y Conexión Real
+        if not es_horario_operativo():
+            print(f"⏳ Fuera de horario institucional (Tokio/Londres/Nueva York). Bot en pausa.")
+            return
+
         api_key = os.getenv('BINGX_API_KEY')
         secret_key = os.getenv('BINGX_SECRET_KEY')
 
@@ -63,14 +103,13 @@ def run_bot():
             'secret': secret_key,
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'swap',  # Futuros perpetuos
+                'defaultType': 'swap',
             }
         })
 
         exchange.load_markets()
-        print("✅ Conexión establecida con la cuenta de BingX.")
+        print("✅ Conexión establecida con la cuenta de BingX (Sesión activa).")
 
-        # 2. Consultar balance y posiciones activas
         balance = exchange.fetch_balance()
         usdt_free = balance['USDT']['free'] if 'USDT' in balance else 0
         print(f"💰 Balance disponible en USDT (Real): {usdt_free}")
@@ -85,15 +124,13 @@ def run_bot():
                 posicion_activa = p
                 break
 
-        # Análisis de mercado
         print(f"📊 Analizando el mercado para {simbolo} en temporalidad {timeframe}...")
         ohlcv = exchange.fetch_ohlcv(simbolo, timeframe=timeframe, limit=250)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Indicadores Técnicos
         df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
-        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()  # Filtro de tendencia principal
+        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
         df['RSI'] = calcular_rsi(df['close'], periodo=14)
         
         length = 130
@@ -112,51 +149,57 @@ def run_bot():
         sr_top_actual = df['SR_Top'].iloc[-1]
         sr_bot_actual = df['SR_Bot'].iloc[-1]
 
+        rango_canal = sr_top_actual - sr_bot_actual
+        div_alcista, div_bajista = detectar_divergencias(df)
+
         print(f"📈 Precio Actual: {precio_actual}")
         print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
         print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
-        print(f"📊 RSI Actual: {rsi_actual:.2f}")
+        print(f"📊 RSI Actual: {rsi_actual:.2f} | Div Alcista: {div_alcista} | Div Bajista: {div_bajista}")
 
-        # 3. GESTIÓN DE POSICIÓN ACTIVA CON TRAILING STOP DINÁMICO
+        # GESTIÓN DE POSICIÓN ACTIVA CON TRAILING STOP DINÁMICO (Desde +0.3%)
         if posicion_activa:
-            side = posicion_activa['side'] # 'long' o 'short'
+            side = posicion_activa['side']
             entry_price = float(posicion_activa['entryPrice'])
             amount = float(posicion_activa['contracts'])
             print(f"ℹ️ Posición activa detectada: {side.upper()} | Entrada: {entry_price} | Cantidad: {amount}")
+
+            sl_actual_exchange = None
+            try:
+                ordenes_abiertas = exchange.fetch_open_orders(simbolo)
+                for o in ordenes_abiertas:
+                    if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
+                        sl_actual_exchange = float(o['info'].get('stopPrice', o.get('price', 0)))
+            except Exception as e_fetch_sl:
+                print(f"⚠️ Nota al consultar órdenes abiertas: {e_fetch_sl}")
 
             if side == 'long':
                 ganancia_pct = ((precio_actual - entry_price) / entry_price) * 100
                 print(f"⏳ Posición LONG activa. Ganancia actual: {ganancia_pct:.2f}%")
 
-                # Activación de Trailing Stop si la ganancia llega al +0.4%
-                if ganancia_pct >= 0.4:
-                    # Precio de SL que asegura +0.2% de ganancia (precio de entrada * 1.002)
-                    nuevo_sl = round(entry_price * 1.002, 1)
-                    
-                    # Si el precio sube aún más, ajustamos el SL dinámicamente manteniendo un 0.2% por debajo del precio actual
-                    sl_dinamico = round(precio_actual * 0.998, 1)
-                    if sl_dinamico > nuevo_sl:
-                        nuevo_sl = sl_dinamico
+                if ganancia_pct >= 0.3:
+                    nuevo_sl = round(precio_actual * 0.998, 1)
+                    if sl_actual_exchange and nuevo_sl < sl_actual_exchange:
+                        nuevo_sl = sl_actual_exchange
 
-                    print(f"🎯 Ganancia >= 0.4% alcanzada ({ganancia_pct:.2f}%). Actualizando Trailing Stop dinámico...")
+                    print(f"🎯 Ganancia >= 0.3% alcanzada. Actualizando Trailing Stop...")
                     try:
                         ordenes_abiertas = exchange.fetch_open_orders(simbolo)
                         for o in ordenes_abiertas:
                             if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
                                 exchange.cancel_order(o['id'], simbolo)
-                                print("🛡️ Stop Loss anterior cancelado.")
                         
                         exchange.create_order(simbolo, 'stop_market', 'sell', amount, None, {
                             'stopPrice': nuevo_sl,
                             'reduceOnly': True
                         })
-                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl} (Asegurando beneficios)")
+                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl}")
                         registrar_operacion("TRAILING_UPDATE", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "ACTIVA")
                     except Exception as e_sl_up:
-                        print(f"⚠️ No se pudo actualizar el Trailing Stop: {e_sl_up}")
+                        print(f"⚠️ Error actualizando Trailing Stop: {e_sl_up}")
                         
                 elif precio_actual >= sr_top_actual and ganancia_pct > 0:
-                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL con ganancias! Cerrando posición completa...")
+                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL! Cerrando posición...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
             
@@ -164,40 +207,34 @@ def run_bot():
                 ganancia_pct = ((entry_price - precio_actual) / entry_price) * 100
                 print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}%")
 
-                # Activación de Trailing Stop Short si la ganancia llega al +0.4%
-                if ganancia_pct >= 0.4:
-                    # Precio de SL que asegura +0.2% de ganancia (precio de entrada * 0.998)
-                    nuevo_sl = round(entry_price * 0.998, 1)
-                    
-                    # Si el precio baja más, el SL baja manteniendo un 0.2% por encima del precio actual
-                    sl_dinamico = round(precio_actual * 1.002, 1)
-                    if sl_dinamico < nuevo_sl:
-                        nuevo_sl = sl_dinamico
+                if ganancia_pct >= 0.3:
+                    nuevo_sl = round(precio_actual * 1.002, 1)
+                    if sl_actual_exchange and nuevo_sl > sl_actual_exchange:
+                        nuevo_sl = sl_actual_exchange
 
-                    print(f"🎯 Ganancia >= 0.4% alcanzada ({ganancia_pct:.2f}%). Actualizando Trailing Stop dinámico...")
+                    print(f"🎯 Ganancia >= 0.3% alcanzada. Actualizando Trailing Stop...")
                     try:
                         ordenes_abiertas = exchange.fetch_open_orders(simbolo)
                         for o in ordenes_abiertas:
                             if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
                                 exchange.cancel_order(o['id'], simbolo)
-                                print("🛡️ Stop Loss anterior cancelado.")
                         
                         exchange.create_order(simbolo, 'stop_market', 'buy', amount, None, {
                             'stopPrice': nuevo_sl,
                             'reduceOnly': True
                         })
-                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl} (Asegurando beneficios)")
+                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl}")
                         registrar_operacion("TRAILING_UPDATE", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "ACTIVA")
                     except Exception as e_sl_up:
-                        print(f"⚠️ No se pudo actualizar el Trailing Stop: {e_sl_up}")
+                        print(f"⚠️ Error actualizando Trailing Stop: {e_sl_up}")
                         
                 elif precio_actual <= sr_bot_actual and ganancia_pct > 0:
-                    print("🚀 ¡Precio tocó el SOPORTE FINAL con ganancias! Cerrando posición completa...")
+                    print("🚀 ¡Precio tocó el SOPORTE FINAL! Cerrando posición...")
                     exchange.close_position(simbolo)
                     registrar_operacion("TP_FINAL", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
             return
 
-        # 4. APERTURA DE NUEVAS ÓRDENES (Con filtro de tendencia EMA 200 y rangos de RSI de Momentum)
+        # APERTURA DE NUEVAS ÓRDENES (Con Tendencia, Ubicación en Canal, Momentum y Divergencias)
         inversion_usd = 0.10 
         cantidad_btc = round(inversion_usd / precio_actual, 4)
         if cantidad_btc < 0.0001:
@@ -205,9 +242,12 @@ def run_bot():
 
         print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC")
 
-        # SOLO COMPRAS (LONG) si Precio > EMA 200 y el RSI está en zona de impulso alcista (60 a 70)
-        if precio_actual > ema200_actual and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and (60 <= rsi_actual < 70))):
-            print("🟢 Señal de COMPRA por Momentum (Precio > EMA 200 y RSI en rango 60-70)...")
+        es_ubicacion_valida_long = precio_actual <= (sr_bot_actual + (rango_canal * 0.45))
+        es_ubicacion_valida_short = precio_actual >= (sr_top_actual - (rango_canal * 0.45))
+
+        # CONDICIÓN DE COMPRA (LONG): Se activa por toque de soporte, cruce de EMAs con rango o por Divergencia Alcista
+        if precio_actual > ema200_actual and es_ubicacion_valida_long and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and (60 <= rsi_actual < 70)) or div_alcista):
+            print("🟢 Señal de COMPRA validada (Tendencia + Zona baja + Momentum / Divergencia Alcista)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
@@ -227,9 +267,9 @@ def run_bot():
             else:
                 print("⚠️ Balance insuficiente para operar.")
 
-        # SOLO VENTAS (SHORT) si Precio < EMA 200 y el RSI está en zona de impulso bajista (30 a 40)
-        elif precio_actual < ema200_actual and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and (30 < rsi_actual <= 40))):
-            print("🔴 Señal de VENTA por Momentum (Precio < EMA 200 y RSI en rango 30-40)...")
+        # CONDICIÓN DE VENTA (SHORT): Se activa por resistencia, cruce de EMAs con rango o por Divergencia Bajista
+        elif precio_actual < ema200_actual and es_ubicacion_valida_short and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and (30 < rsi_actual <= 40)) or div_bajista):
+            print("🔴 Señal de VENTA validada (Tendencia + Zona alta + Momentum / Divergencia Bajista)...")
             if usdt_free >= 0.05:
                 orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
                 order_id = orden.get('id', '')
@@ -249,7 +289,7 @@ def run_bot():
             else:
                 print("⚠️ Balance insuficiente para operar.")
         else:
-            print("⏳ Sin señales válidas (filtrado por tendencia EMA 200 o RSI fuera de rangos de momentum).")
+            print("⏳ Sin señales válidas (filtrado por horario, tendencia, canal o ausencia de divergencia/momentum).")
 
     except Exception as e:
         print(f"⚠️ Error al operar: {e}")
