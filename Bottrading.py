@@ -4,295 +4,201 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
-# Archivo donde se guardará el registro
-CSV_FILE = 'historial_operaciones.csv'
+# --- CONFIGURACIÓN DE CREDENCIALES Y BINGX ---
+# Se obtienen de las variables de entorno de GitHub Actions (Secrets)
+api_key = os.getenv('BINGX_API_KEY')
+api_secret = os.getenv('BINGX_API_SECRET')
 
-def registrar_operacion(evento, simbolo, tipo, precio_entrada, precio_salida=0.0, resultado_pct=0.0, estado="ABIERTA", id_orden=""):
-    """Guarda un registro estructurado de cada operación en el archivo CSV."""
-    encabezados = ['Fecha_Hora', 'Evento', 'Simbolo', 'Tipo', 'Precio_Entrada', 'Precio_Salida', 'Resultado_Pct', 'Estado', 'ID_Orden']
-    
-    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    nueva_fila = {
-        'Fecha_Hora': fecha_actual,
-        'Evento': evento,
-        'Simbolo': simbolo,
-        'Tipo': tipo.upper(),
-        'Precio_Entrada': precio_entrada,
-        'Precio_Salida': precio_salida,
-        'Resultado_Pct': round(resultado_pct, 2),
-        'Estado': estado,
-        'ID_Orden': id_orden
+exchange = ccxt.bingx({
+    'apiKey': api_key,
+    'secret': api_secret,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'swap',  # Mercado de Futuros Perpetuos
     }
-    
-    if not os.path.exists(CSV_FILE):
-        df_log = pd.DataFrame([nueva_fila], columns=encabezados)
-        df_log.to_csv(CSV_FILE, index=False)
-    else:
-        df_log = pd.DataFrame([nueva_fila])
-        df_log.to_csv(CSV_FILE, mode='a', header=False, index=False)
-        
-    print(f"📝 Registrado en CSV -> Evento: {evento} | Tipo: {tipo} | Estado: {estado}")
+})
 
-def calcular_rsi(series, periodo=14):
-    delta = series.diff()
-    ganancia = (delta.where(delta > 0, 0)).rolling(window=periodo).mean()
-    perdida = (-delta.where(delta < 0, 0)).rolling(window=periodo).mean()
-    rs = ganancia / perdida
-    return 100 - (100 / (1 + rs))
+# Cargar mercados para asegurar compatibilidad
+exchange.load_markets()
 
-def calcular_atr(df, periodo=200):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(window=periodo).mean()
+# --- PARÁMETROS DE TRADING ---
+SYMBOL = 'BTC/USDT:USDT'
+TIMEFRAME = '15m'
+LEVERAGE = 10
+MARGEN_USDT = 1.0  # Margen fijo ajustado a $1.00 USDT
 
-def detectar_divergencias(df):
-    """
-    Detecta divergencias simples en las últimas velas:
-    - Alcista: Precio hace mínimo más bajo, RSI hace mínimo más alto.
-    - Bajista: Precio hace máximo más alto, RSI hace máximo más bajo.
-    """
-    if len(df) < 15:
-        return False, False
-
-    # Tomamos una ventana reciente para buscar pivotes
-    p_reciente = df['close'].iloc[-1]
-    p_anterior = df['close'].iloc[-6]
-    p_pasado = df['close'].iloc[-12]
-
-    rsi_reciente = df['RSI'].iloc[-1]
-    rsi_anterior = df['RSI'].iloc[-6]
-    rsi_pasado = df['RSI'].iloc[-12]
-
-    # Divergencia Alcista: Precio cae (mínimo más bajo) pero RSI sube (mínimo más alto)
-    divergencia_alcista = (p_reciente < p_anterior) and (rsi_reciente > rsi_anterior) and (rsi_reciente < 45)
-
-    # Divergencia Bajista: Precio sube (máximo más alto) pero RSI baja (máximo más bajo)
-    divergencia_bajista = (p_reciente > p_anterior) and (rsi_reciente < rsi_anterior) and (rsi_reciente > 55)
-
-    return divergencia_alcista, divergencia_bajista
-
+# --- 1. VERIFICACIÓN DE HORARIO INSTITUCIONAL ---
 def es_horario_operativo():
-    """Valida si alguna de las tres grandes sesiones (Tokio, Londres, Nueva York) está activa en UTC."""
+    """
+    Valida si la hora UTC actual se encuentra dentro de las ventanas 
+    de alta liquidez institucional: Tokio, Londres o Nueva York.
+    """
     now_utc = datetime.now(timezone.utc)
-    hora = now_utc.hour + now_utc.minute / 60.0
+    hora_decimal = now_utc.hour + now_utc.minute / 60.0
     
-    tokio = 0 <= hora < 9          # 00:00 a 09:00 UTC
-    londres = 8 <= hora < 16.5     # 08:00 a 16:30 UTC
-    ny = 13.5 <= hora < 20         # 13:30 a 20:00 UTC
+    # Tokio: 00:00 - 09:00 UTC
+    # Londres: 08:00 - 16:30 UTC
+    # Nueva York: 13:30 - 20:00 UTC
+    tokio = 0.0 <= hora_decimal <= 9.0
+    londres = 8.0 <= hora_decimal <= 16.5
+    ny = 13.5 <= hora_decimal <= 20.0
     
     return tokio or londres or ny
 
-def run_bot():
+# --- 2. INDICADORES TÉCNICOS ---
+def calcular_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calcular_canal_sr(df, lookback=130):
+    """Calcula el canal de Soporte y Resistencia basado en máximos y mínimos con ATR"""
+    highs = df['high'].rolling(window=lookback).max()
+    lows = df['low'].rolling(window=lookback).min()
+    atr = (df['high'] - df['low']).rolling(window=200).mean()
+    resistencia = highs - (atr * 0.5)
+    soporte = lows + (atr * 0.5)
+    return soporte, resistencia
+
+def detectar_divergencias(df):
+    """Detecta divergencias simples entre el precio y el RSI"""
+    close = df['close']
+    rsi = df['rsi']
+    
+    # Pivotes simples en las últimas 5 velas
+    div_alcista = (close.iloc[-1] < close.iloc[-5]) and (rsi.iloc[-1] > rsi.iloc[-5]) and (rsi.iloc[-1] < 45)
+    div_bajista = (close.iloc[-1] > close.iloc[-5]) and (rsi.iloc[-1] < rsi.iloc[-15]) and (rsi.iloc[-1] > 55)
+    
+    return bool(div_alcista), bool(div_bajista)
+
+# --- 3. REGISTRO EN BITÁCORA (CSV) ---
+def registrar_en_csv(evento, tipo, precio_entrada, precio_salida, resultado_pct, estado, id_orden=""):
+    archivo = "historial_operaciones.csv"
+    columnas = ["Fecha_Hora", "Evento", "Simbolo", "Tipo", "Precio_Entrada", "Precio_Salida", "Resultado_Pct", "Estado", "ID_Orden"]
+    
+    # Si no existe el archivo, crearlo con encabezados
+    if not os.path.exists(archivo):
+        df_init = pd.DataFrame(columns=columnas)
+        df_init.to_csv(archivo, index=False)
+        
+    nueva_fila = {
+        "Fecha_Hora": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "Evento": evento,
+        "Simbolo": SYMBOL,
+        "Tipo": tipo,
+        "Precio_Entrada": precio_entrada,
+        "Precio_Salida": precio_salida,
+        "Resultado_Pct": resultado_pct,
+        "Estado": estado,
+        "ID_Orden": id_orden
+    }
+    
+    df = pd.DataFrame([nueva_fila])
+    df.to_csv(archivo, mode='a', header=False, index=False)
+
+# --- 4. EJECUCIÓN PRINCIPAL DEL BOT ---
+def ejecutar_bot():
+    print("--------------------------------------------------")
+    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC] Iniciando ciclo del bot...")
+    
+    # Verificar horario institucional
+    if not es_horario_operativo():
+        print("⏳ Fuera de horario institucional (Tokio/Londres/NY). El bot se pausa por seguridad.")
+        return
+
     try:
-        if not es_horario_operativo():
-            print(f"⏳ Fuera de horario institucional (Tokio/Londres/Nueva York). Bot en pausa.")
-            return
+        # Sincronizar apalancamiento
+        try:
+            exchange.set_leverage(LEVERAGE, SYMBOL)
+        except Exception:
+            pass
 
-        api_key = os.getenv('BINGX_API_KEY')
-        secret_key = os.getenv('BINGX_SECRET_KEY')
-
-        if not api_key or not secret_key:
-            print("❌ Error: No se encontraron las credenciales en las variables de entorno.")
-            return
-
-        exchange = ccxt.bingx({
-            'apiKey': api_key,
-            'secret': secret_key,
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'swap',
-            }
-        })
-
-        exchange.load_markets()
-        print("✅ Conexión establecida con la cuenta de BingX (Sesión activa).")
-
+        # Obtener balance disponible
         balance = exchange.fetch_balance()
-        usdt_free = balance['USDT']['free'] if 'USDT' in balance else 0
-        print(f"💰 Balance disponible en USDT (Real): {usdt_free}")
+        usdt_free = balance['USDT']['free']
+        print(f"💰 Balance disponible en USDT (Real): {usdt_free:.4f}")
 
-        simbolo = 'BTC/USDT:USDT'
-        timeframe = '15m'
+        if usdt_free < MARGEN_USDT:
+            print("⚠️ Advertencia: El balance disponible es menor al margen configurado ($1 USDT).")
 
-        posiciones = exchange.fetch_positions([simbolo])
-        posicion_activa = None
-        for p in posiciones:
-            if float(p['contracts']) > 0:
-                posicion_activa = p
-                break
-
-        print(f"📊 Analizando el mercado para {simbolo} en temporalidad {timeframe}...")
-        ohlcv = exchange.fetch_ohlcv(simbolo, timeframe=timeframe, limit=250)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        # Obtener datos de mercado (Velas de 15m)
+        print(f"📊 Analizando el mercado para {SYMBOL} en temporalidad {TIMEFRAME}...")
+        bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
+        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
-        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
-        df['RSI'] = calcular_rsi(df['close'], periodo=14)
+        # Calcular indicadores
+        df['ema_9'] = df['close'].ewm(span=9).mean()
+        df['ema_21'] = df['close'].ewm(span=21).mean()
+        df['ema_200'] = df['close'].ewm(span=200).mean()
+        df['rsi'] = calcular_rsi(df['close'], 14)
         
-        length = 130
-        atr_series = calcular_atr(df, periodo=200)
-        rolling_max = df['high'].rolling(window=length).max()
-        rolling_min = df['low'].rolling(window=length).min()
-        
-        df['SR_Top'] = rolling_max + (atr_series * 0.5)
-        df['SR_Bot'] = rolling_min - (atr_series * 0.5)
+        soporte, resistencia = calcular_canal_sr(df, lookback=130)
+        df['soporte'] = soporte
+        df['resistencia'] = resistencia
         
         precio_actual = df['close'].iloc[-1]
-        ema9_actual = df['EMA_9'].iloc[-1]
-        ema21_actual = df['EMA_21'].iloc[-1]
-        ema200_actual = df['EMA_200'].iloc[-1]
-        rsi_actual = df['RSI'].iloc[-1]
-        sr_top_actual = df['SR_Top'].iloc[-1]
-        sr_bot_actual = df['SR_Bot'].iloc[-1]
-
-        rango_canal = sr_top_actual - sr_bot_actual
+        ema_200 = df['ema_200'].iloc[-1]
+        sup_actual = df['soporte'].iloc[-1]
+        res_actual = df['resistencia'].iloc[-1]
+        rsi_actual = df['rsi'].iloc[-1]
+        
         div_alcista, div_bajista = detectar_divergencias(df)
-
+        
         print(f"📈 Precio Actual: {precio_actual}")
-        print(f"📈 EMA 200 (Tendencia): {ema200_actual:.2f}")
-        print(f"📊 Canal S&R -> Soporte: {sr_bot_actual:.2f} | Resistencia: {sr_top_actual:.2f}")
+        print(f"📉 EMA 200 (Tendencia): {ema_200:.2f}")
+        print(f"📊 Canal S&R -> Soporte: {sup_actual:.2f} | Resistencia: {res_actual:.2f}")
         print(f"📊 RSI Actual: {rsi_actual:.2f} | Div Alcista: {div_alcista} | Div Bajista: {div_bajista}")
 
-        # GESTIÓN DE POSICIÓN ACTIVA CON TRAILING STOP DINÁMICO (Desde +0.3%)
-        if posicion_activa:
-            side = posicion_activa['side']
-            entry_price = float(posicion_activa['entryPrice'])
-            amount = float(posicion_activa['contracts'])
-            print(f"ℹ️ Posición activa detectada: {side.upper()} | Entrada: {entry_price} | Cantidad: {amount}")
-
-            sl_actual_exchange = None
-            try:
-                ordenes_abiertas = exchange.fetch_open_orders(simbolo)
-                for o in ordenes_abiertas:
-                    if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
-                        sl_actual_exchange = float(o['info'].get('stopPrice', o.get('price', 0)))
-            except Exception as e_fetch_sl:
-                print(f"⚠️ Nota al consultar órdenes abiertas: {e_fetch_sl}")
-
-            if side == 'long':
-                ganancia_pct = ((precio_actual - entry_price) / entry_price) * 100
-                print(f"⏳ Posición LONG activa. Ganancia actual: {ganancia_pct:.2f}%")
-
-                if ganancia_pct >= 0.3:
-                    nuevo_sl = round(precio_actual * 0.998, 1)
-                    if sl_actual_exchange and nuevo_sl < sl_actual_exchange:
-                        nuevo_sl = sl_actual_exchange
-
-                    print(f"🎯 Ganancia >= 0.3% alcanzada. Actualizando Trailing Stop...")
-                    try:
-                        ordenes_abiertas = exchange.fetch_open_orders(simbolo)
-                        for o in ordenes_abiertas:
-                            if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
-                                exchange.cancel_order(o['id'], simbolo)
-                        
-                        exchange.create_order(simbolo, 'stop_market', 'sell', amount, None, {
-                            'stopPrice': nuevo_sl,
-                            'reduceOnly': True
-                        })
-                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl}")
-                        registrar_operacion("TRAILING_UPDATE", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "ACTIVA")
-                    except Exception as e_sl_up:
-                        print(f"⚠️ Error actualizando Trailing Stop: {e_sl_up}")
-                        
-                elif precio_actual >= sr_top_actual and ganancia_pct > 0:
-                    print("🚀 ¡Precio tocó la RESISTENCIA FINAL! Cerrando posición...")
-                    exchange.close_position(simbolo)
-                    registrar_operacion("TP_FINAL", simbolo, "LONG", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
-            
-            else: # SHORT
-                ganancia_pct = ((entry_price - precio_actual) / entry_price) * 100
-                print(f"⏳ Posición SHORT activa. Ganancia actual: {ganancia_pct:.2f}%")
-
-                if ganancia_pct >= 0.3:
-                    nuevo_sl = round(precio_actual * 1.002, 1)
-                    if sl_actual_exchange and nuevo_sl > sl_actual_exchange:
-                        nuevo_sl = sl_actual_exchange
-
-                    print(f"🎯 Ganancia >= 0.3% alcanzada. Actualizando Trailing Stop...")
-                    try:
-                        ordenes_abiertas = exchange.fetch_open_orders(simbolo)
-                        for o in ordenes_abiertas:
-                            if o['type'] == 'stop_market' or o.get('info', {}).get('stopPrice'):
-                                exchange.cancel_order(o['id'], simbolo)
-                        
-                        exchange.create_order(simbolo, 'stop_market', 'buy', amount, None, {
-                            'stopPrice': nuevo_sl,
-                            'reduceOnly': True
-                        })
-                        print(f"🛡️ Trailing Stop actualizado en: {nuevo_sl}")
-                        registrar_operacion("TRAILING_UPDATE", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "ACTIVA")
-                    except Exception as e_sl_up:
-                        print(f"⚠️ Error actualizando Trailing Stop: {e_sl_up}")
-                        
-                elif precio_actual <= sr_bot_actual and ganancia_pct > 0:
-                    print("🚀 ¡Precio tocó el SOPORTE FINAL! Cerrando posición...")
-                    exchange.close_position(simbolo)
-                    registrar_operacion("TP_FINAL", simbolo, "SHORT", entry_price, precio_actual, ganancia_pct, "CERRADA_EXITO")
-            return
-
-        # APERTURA DE NUEVAS ÓRDENES (Con Tendencia, Ubicación en Canal, Momentum y Divergencias)
-        inversion_usd = 0.10 
-        cantidad_btc = round(inversion_usd / precio_actual, 4)
+        # Calcular tamaño de la orden (Margen $1 * 10x Leverage = $10 Posición Nominal)
+        monto_nominal_usdt = MARGEN_USDT * LEVERAGE
+        cantidad_btc = round(monto_nominal_usdt / precio_actual, 4)
         if cantidad_btc < 0.0001:
             cantidad_btc = 0.0001
+            
+        print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC (Margen: ${MARGEN_USDT} USDT)")
 
-        print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC")
+        # --- LÓGICA DE ENTRADA ---
+        # LONG: Precio > EMA 200, RSI < 45 u oversold, divergencia alcista y lejos de la resistencia
+        condicion_long = (
+            precio_actual > ema_200 and 
+            rsi_actual < 45 and 
+            div_alcista and 
+            (res_actual - precio_actual) > (precio_actual * 0.005)
+        )
 
-        es_ubicacion_valida_long = precio_actual <= (sr_bot_actual + (rango_canal * 0.45))
-        es_ubicacion_valida_short = precio_actual >= (sr_top_actual - (rango_canal * 0.45))
+        # SHORT: Precio < EMA 200, RSI > 55 o overbought, divergencia bajista y lejos del soporte
+        condicion_short = (
+            precio_actual < ema_200 and 
+            rsi_actual > 55 and 
+            div_bajista and 
+            (precio_actual - sup_actual) > (precio_actual * 0.005)
+        )
 
-        # CONDICIÓN DE COMPRA (LONG): Se activa por toque de soporte, cruce de EMAs con rango o por Divergencia Alcista
-        if precio_actual > ema200_actual and es_ubicacion_valida_long and (precio_actual <= (sr_bot_actual * 1.003) or (ema9_actual > ema21_actual and (60 <= rsi_actual < 70)) or div_alcista):
-            print("🟢 Señal de COMPRA validada (Tendencia + Zona baja + Momentum / Divergencia Alcista)...")
-            if usdt_free >= 0.05:
-                orden = exchange.create_market_buy_order(simbolo, cantidad_btc)
-                order_id = orden.get('id', '')
-                print(f"✅ ¡Orden de COMPRA ejecutada con éxito! ID: {order_id}")
+        # Verificar si ya existen posiciones abiertas en BingX
+        posiciones = exchange.fetch_positions([SYMBOL])
+        posicion_abierta = any(float(p['contracts']) > 0 for p in posiciones if p['symbol'] == SYMBOL)
+
+        if not posicion_abierta:
+            if condicion_long:
+                print("🚀 ¡Señal de COMPRA (LONG) detectada! Abriendo posición...")
+                order = exchange.create_market_buy_order(SYMBOL, cantidad_btc)
+                registrar_en_csv("APERTURA", "LONG", precio_actual, 0.0, 0.0, "ABIERTA", order.get('id', ''))
+                print("✅ Orden LONG ejecutada y registrada con éxito.")
                 
-                sl_inicial = round(sr_bot_actual * 0.992, 1)
-                try:
-                    exchange.create_order(simbolo, 'stop_market', 'sell', cantidad_btc, None, {
-                        'stopPrice': sl_inicial,
-                        'reduceOnly': True
-                    })
-                    print(f"🛡️ Stop Loss protector colocado en: {sl_inicial}")
-                except Exception as e_sl:
-                    print(f"⚠️ Detalle al colocar SL inicial: {e_sl}")
-                
-                registrar_operacion("APERTURA", simbolo, "LONG", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
+            elif condicion_short:
+                print("📉 ¡Señal de VENTA (SHORT) detectada! Abriendo posición...")
+                order = exchange.create_market_sell_order(SYMBOL, cantidad_btc)
+                registrar_en_csv("APERTURA", "SHORT", precio_actual, 0.0, 0.0, "ABIERTA", order.get('id', ''))
+                print("✅ Orden SHORT ejecutada y registrada con éxito.")
             else:
-                print("⚠️ Balance insuficiente para operar.")
-
-        # CONDICIÓN DE VENTA (SHORT): Se activa por resistencia, cruce de EMAs con rango o por Divergencia Bajista
-        elif precio_actual < ema200_actual and es_ubicacion_valida_short and (precio_actual >= (sr_top_actual * 0.997) or (ema9_actual < ema21_actual and (30 < rsi_actual <= 40)) or div_bajista):
-            print("🔴 Señal de VENTA validada (Tendencia + Zona alta + Momentum / Divergencia Bajista)...")
-            if usdt_free >= 0.05:
-                orden = exchange.create_market_sell_order(simbolo, cantidad_btc)
-                order_id = orden.get('id', '')
-                print(f"✅ ¡Orden de VENTA ejecutada con éxito! ID: {order_id}")
-                
-                sl_inicial = round(sr_top_actual * 1.008, 1)
-                try:
-                    exchange.create_order(simbolo, 'stop_market', 'buy', cantidad_btc, None, {
-                        'stopPrice': sl_inicial,
-                        'reduceOnly': True
-                    })
-                    print(f"🛡️ Stop Loss protector colocado en: {sl_inicial}")
-                except Exception as e_sl:
-                    print(f"⚠️ Detalle al colocar SL inicial: {e_sl}")
-                
-                registrar_operacion("APERTURA", simbolo, "SHORT", precio_actual, 0.0, 0.0, "ABIERTA", order_id)
-            else:
-                print("⚠️ Balance insuficiente para operar.")
+                print("⏳ Sin señales válidas (filtrado por horario, tendencia, canal o ausencia de divergencia/momentum).")
         else:
-            print("⏳ Sin señales válidas (filtrado por horario, tendencia, canal o ausencia de divergencia/momentum).")
+            print("🔒 Ya existe una posición abierta. El bot mantiene el monitoreo de riesgo activo.")
 
     except Exception as e:
-        print(f"⚠️ Error al operar: {e}")
+        print(f"❌ Error durante la ejecución del bot: {e}")
 
 if __name__ == "__main__":
-    run_bot()
+    ejecutar_bot()
