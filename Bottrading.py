@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 # --- CONFIGURACIÓN DE CREDENCIALES Y BINGX ---
 # Se obtienen de las variables de entorno de GitHub Actions (Secrets)
 api_key = os.getenv('BINGX_API_KEY')
-api_secret = os.getenv('BINGX_API_SECRET')
+api_secret = os.getenv('BINGX_SECRET_KEY')  # Coincide exactamente con tu secret de GitHub
 
 exchange = ccxt.bingx({
     'apiKey': api_key,
@@ -25,7 +25,7 @@ exchange.load_markets()
 SYMBOL = 'BTC/USDT:USDT'
 TIMEFRAME = '15m'
 LEVERAGE = 10
-MARGEN_USDT = 1.0  # Margen fijo ajustado a $1.00 USDT
+MARGEN_USDT = 1.0  # Margen fijo configurado a $1.00 USDT
 
 # --- 1. VERIFICACIÓN DE HORARIO INSTITUCIONAL ---
 def es_horario_operativo():
@@ -67,7 +67,7 @@ def detectar_divergencias(df):
     close = df['close']
     rsi = df['rsi']
     
-    # Pivotes simples en las últimas 5 velas
+    # Pivotes simples en las últimas velas
     div_alcista = (close.iloc[-1] < close.iloc[-5]) and (rsi.iloc[-1] > rsi.iloc[-5]) and (rsi.iloc[-1] < 45)
     div_bajista = (close.iloc[-1] > close.iloc[-5]) and (rsi.iloc[-1] < rsi.iloc[-15]) and (rsi.iloc[-1] > 55)
     
@@ -160,7 +160,6 @@ def ejecutar_bot():
         print(f"⚙️ Monto calculado para la orden: {cantidad_btc} BTC (Margen: ${MARGEN_USDT} USDT)")
 
         # --- LÓGICA DE ENTRADA ---
-        # LONG: Precio > EMA 200, RSI < 45 u oversold, divergencia alcista y lejos de la resistencia
         condicion_long = (
             precio_actual > ema_200 and 
             rsi_actual < 45 and 
@@ -168,7 +167,6 @@ def ejecutar_bot():
             (res_actual - precio_actual) > (precio_actual * 0.005)
         )
 
-        # SHORT: Precio < EMA 200, RSI > 55 o overbought, divergencia bajista y lejos del soporte
         condicion_short = (
             precio_actual < ema_200 and 
             rsi_actual > 55 and 
